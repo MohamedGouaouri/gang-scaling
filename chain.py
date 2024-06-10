@@ -1,10 +1,10 @@
 import gym
 import networkx as nx
 import numpy as np
-import threading
 import torch
 import matplotlib.pyplot as plt
 import time
+from apscheduler.schedulers.background import BackgroundScheduler
 from typing import List
 from deployment import Deployment
 from load_generator import RequestPath, LoadGenerator
@@ -24,7 +24,6 @@ class MicroServiceChain(gym.Env):
         self.entry_point = entry_point
 
         self._build_graph_map()
-        # self.graph = dict()
         self.graph = nx.DiGraph()
         self.max_replicas = max_replicas
 
@@ -41,19 +40,22 @@ class MicroServiceChain(gym.Env):
             dtype=np.float32
         )
 
+        # Reward parameter
         self.slo_reward_factor = slo_reward_factor
         self.resource_reward_factor = 1 - self.slo_reward_factor
 
         self.requests_paths = []
         self._built = False
+
+        # Graph parameter
         self.edge_index = None
         self.batch = None
 
         self.n_aborted_requests  = 0
         self.cool_down_period = 5
 
-        self.scheduler = threading.Thread(target=self.generate_load_continuously, daemon=True)
-
+        # self.scheduler = threading.Thread(target=self.generate_load_continuously)
+        self.scheduler = BackgroundScheduler()
 
     def add_chain(self, source: str, target: str):
         # First, we need to make sure that source and target are part of the graph
@@ -69,9 +71,6 @@ class MicroServiceChain(gym.Env):
         self.load_generator = LoadGenerator(requests_paths=self.requests_paths,)
         self._update_graph_attr()
         self._built = True
-        # Run the generator
-        # self.scheduler.add_job(self._generate_load, 'interval', seconds=1/10, max_instances=1000)
-        # self.scheduler.start()
 
 
     def _build_graph_map(self):
@@ -85,22 +84,23 @@ class MicroServiceChain(gym.Env):
     def step(self, action):
         # Apply the action (scale the deployments)
         for i, replicas in enumerate(action):
-            # print(replicas)
             self.microservices[i].scale(replicas + 1)
 
+        # print('Cooling down after scaling')
         time.sleep(self.cool_down_period)
+
+        self._update_graph_attr()
 
         # Get the new state
         state = self._get_graph_state()
+
+        # print(f"Graph state in step function {state}")
 
         # Calculate reward
         reward = self._calculate_reward(state)
 
         # Check if the episode is done
         done = self._check_done(state)
-
-
-        self._update_graph_attr()
 
         return state, reward, done, {}
 
@@ -121,7 +121,7 @@ class MicroServiceChain(gym.Env):
         data = from_networkx(self.graph)
         data.x = np.array([data.replicas, data.latency, data.cpu_usage, data.memory_usage]).T
         data.x = torch.from_numpy(data.x)
-        data.batch = torch.zeros(data.x.size(0), dtype=torch.long)
+        data.batch = batch = torch.zeros(data.x.size(0), dtype=torch.long)
         del data.replicas
         del data.latency
         del data.cpu_usage
@@ -129,6 +129,7 @@ class MicroServiceChain(gym.Env):
 
         self.edge_index = data.edge_index
         self.batch = data.batch
+
 
         return data.x
 
@@ -145,6 +146,7 @@ class MicroServiceChain(gym.Env):
                 'cpu_usage': cpu_usage,
                 'memory_usage': memory_usage
             }
+        # print(feature_map)
         nx.set_node_attributes(self.graph, feature_map)
 
     def _calculate_reward(self, state):
@@ -156,20 +158,21 @@ class MicroServiceChain(gym.Env):
         memory_usages = state[:, 2]
         # print(state)
 
-        reward = - self.slo_reward_factor * torch.mean(latencies)  # Minimize total latency
+        reward = -self.slo_reward_factor * torch.mean(latencies)  # Minimize total latency
         reward -= self.resource_reward_factor * torch.mean(cpu_usages)  # Penalize high CPU usage
         reward -= self.resource_reward_factor * torch.mean(memory_usages)  # Penalize high memory usage
         # reward -= np.mean(replicas)  # Penalize using more replicas
-        reward -= self.n_aborted_requests * 100
+        reward -= self.n_aborted_requests * 10
 
         return reward
 
     def reset(self):
-        # Reset the environment to an initial state
-        for deployment in self.microservices:
-            deployment.scale(1)  # Reset to 1 replica per deployment
 
         self._update_graph_attr()
+        self.n_aborted_requests = 0
+
+        if not self.scheduler.running:
+            self.start()
 
         return self._get_graph_state()
 
@@ -180,16 +183,17 @@ class MicroServiceChain(gym.Env):
         cpu_usages = state[:, 1]
         memory_usages = state[:, 2]
         # Arbitrary threshold
-        if torch.any(latencies > 10) or torch.any(cpu_usages >= 1.0) or torch.any(memory_usages >= 1.0):
+        if torch.any(latencies > 10) or torch.any(cpu_usages > 1.0) or torch.any(memory_usages > 1.0):
             return True
         return False
 
 
     def generate_load_continuously(self):
-        while True:
+        while True and self.scheduler.running:
             # Generate load here
+            # print("Generating load")
             self._generate_load()
-            time.sleep(1)  # Adjust the sleep time as necessary
+            time.sleep(1/100)  # Adjust the sleep time as necessary
 
     def _generate_load(self,):
         generated_requests = self.load_generator.generate()
@@ -198,9 +202,13 @@ class MicroServiceChain(gym.Env):
                 self.__call__(req)
                 if req.status == RequestStatus.ABORTED:
                     self.n_aborted_requests += 1
-
+        # print(f"number of abortions is: {self.n_aborted_requests}")
 
     def start(self):
+        self.scheduler.add_job(self.generate_load_continuously)
+        if self.scheduler.running:
+          self.scheduler.resume()
+          return
         self.scheduler.start()
 
 
@@ -213,4 +221,5 @@ class MicroServiceChain(gym.Env):
     def stop(self):
         for deployment in self.microservices:
             deployment.stop()
-        # self.scheduler.shutdown()
+
+        self.scheduler.shutdown()

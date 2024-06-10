@@ -88,7 +88,7 @@ class ChainableRequest(PodRequest):
         super().__init__(request_id, cpu_consumption, memory_consumption, queuing_latency, processing_latency,status, load_type)
         self.next_request = next_request
         self.retries = 0
-        self.max_retries = 0
+        self.max_retries = 3
 
 
     def total_processing_latency(self):

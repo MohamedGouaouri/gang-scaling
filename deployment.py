@@ -66,14 +66,19 @@ class Deployment:
         if (self.replicas > new_replicas) and len(self.pods) != 0:
             # Make scaling down action
             # First we need to designate pods to terminate
+            # print("Scaling down")
             if new_replicas == 0:
                 print(f"Warning: scaling deployment {self.name} to 0")
+
+            # TODO: Wait for the queue to be empty first
             pods_to_terminate = random.choices(self.pods, k = self.replicas - new_replicas)
             for pod in pods_to_terminate:
                 pod.stop()
+            self.replicas = new_replicas
             return
         elif self.replicas < new_replicas:
             # Make scale up action
+            # print("Scaling up")
             self.pods += [Pod(
                             name=f"pod-{r+len(self.pods)}-{self.name}",
                             scheduler=self.scheduler,
@@ -83,10 +88,13 @@ class Deployment:
                             service_rate=self.pod_service_rate,
                             create=create,
                         ) for r in range(new_replicas - self.replicas)]
+
+            self.replicas = new_replicas
+
             return
 
     def terminate_pod(self, pod: Pod):
-        self.pods = list(filter(lambda p: p.pod_id == pod.pod_id, self.pods))
+        # self.pods = list(filter(lambda p: p.pod_id == pod.pod_id, self.pods))
         pod.stop()
 
     def stop(self):
@@ -94,7 +102,7 @@ class Deployment:
         for pod in self.pods:
             pod.stop()
         # Stop the scheduler
-        self.scheduler.shutdown(wait=True)
+        self.scheduler.shutdown()
 
     def get_latency(self):
         l = list(map(lambda pod: pod.get_pod_latency(), self.pods))

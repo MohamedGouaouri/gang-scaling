@@ -15,6 +15,7 @@ import numpy as np
 import logging
 import os
 import warnings
+from tqdm import tqdm
 
 
 
@@ -31,7 +32,7 @@ logging.getLogger('apscheduler.executors.default').propagate = False
 
 deps = [
     Deployment(
-        name="d1",
+        name="frontend",
         replicas=1,
         pod_cpu_limit=4000,
         pod_memory_limit=2**30, # 1 gb
@@ -41,17 +42,17 @@ deps = [
         # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
-        name="d2",
+        name="backend",
         replicas=2,
         pod_cpu_limit=4000, # 4 cpus
-        pod_memory_limit=2**30, # 1 gb
+        pod_memory_limit=2 * 2**30, # 1 gb
         pod_arrival_rate=5,
         pod_service_rate=4,
         create=True,
         # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
-        name="d3",
+        name="database",
         replicas=3,
         pod_cpu_limit=1000, # 1 cpus
         pod_memory_limit=2**30, # 1 gb
@@ -61,7 +62,7 @@ deps = [
         # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
-        name="d4",
+        name="redis",
         replicas=2,
         pod_cpu_limit=3000, # 3 cpus
         pod_memory_limit=2**30, # 1 gb
@@ -73,6 +74,7 @@ deps = [
     )
 ]
 
+
 chain = MicroServiceChain(
     microservices=deps,
     entry_point=deps[0],
@@ -80,16 +82,16 @@ chain = MicroServiceChain(
 )
 
 chain\
-    .add_chain('d1', 'd2')\
-    .add_chain('d2', 'd3')\
-    .add_chain('d2', 'd4')\
-    .add_chain('d4', 'd3')\
+    .add_chain('frontend', 'backend')\
+    .add_chain('backend', 'database')\
+    .add_chain('backend', 'redis')\
+    .add_chain('redis', 'database')\
     .build()
 # requests_paths = [RequestPath(deps[0], deps[1], deps[3], 5), RequestPath(deps[0], deps[1], deps[3], deps[2], 5)]
 chain.add_request_path(
     RequestPath(
         microservices=[deps[0], deps[1], deps[2]],
-        num_requests=1,
+        num_requests=5,
         load_types = [RequestLoadType.LOW_CPU_LOW_MEM, RequestLoadType.LOW_CPU_HIGH_MEM, RequestLoadType.HIGH_CPU_HIGH_MEM],
     ))
 # ).add_request_path(
@@ -128,8 +130,7 @@ class ChainGraphDQN(nn.Module):
         self.conv1 = GCNConv(num_node_features, 16)
         self.conv2 = GCNConv(16, 16)
         self.layer1 = nn.Linear(16, 64)
-        self.layer2 = nn.Linear(64, 128)
-        self.graph_fc = nn.Linear(128, 64)
+        self.layer2 = nn.Linear(64, 64)
         self.out_layers = nn.ModuleList([nn.Linear(64, n_actions) for _ in range(n_microservices)])
 
         self.edge_index = edge_index.to(device)
@@ -142,6 +143,8 @@ class ChainGraphDQN(nn.Module):
     # during optimization.
     def forward(self, x):
 
+        # print(x)
+
         # print(f"Input shape: {x.shape}")
 
         x = x.to(torch.float32).to(self.device)
@@ -153,14 +156,13 @@ class ChainGraphDQN(nn.Module):
         x = F.dropout(x, training=self.training)
         x = self.conv2(x, self.edge_index)
 
+        x = global_mean_pool(x, self.batch)
 
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
 
         # print(f"Before global mean {x.shape}")
-        x = global_mean_pool(x, self.batch)
         # print(f"After global mean {x.shape}")
-        x = self.graph_fc(x)
         x = F.relu(x)
 
         out = torch.stack([net(x) for net in self.out_layers], dim=1)
@@ -177,9 +179,9 @@ class ChainGraphDQN(nn.Module):
 # TAU is the update rate of the target network
 # LR is the learning rate of the ``AdamW`` optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 GAMMA = 0.99
-EPS_START = 0.9
+EPS_START = 0.5
 EPS_END = 0.05
 EPS_DECAY = 1000
 TAU = 0.005
@@ -216,7 +218,7 @@ target_net.load_state_dict(policy_net.state_dict())
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 criterion = nn.SmoothL1Loss()
-memory = ReplayMemory(64)
+memory = ReplayMemory(16)
 
 
 steps_done = 0
@@ -238,8 +240,6 @@ def select_action(env, state):
         return out
 
 def optimize_model():
-    if len(memory) < BATCH_SIZE:
-        return
 
     transitions = memory.sample(BATCH_SIZE)
     # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
@@ -295,70 +295,79 @@ def optimize_model():
 
 
 if torch.cuda.is_available():
-    num_episodes = 100
+    num_episodes = 200
 else:
     num_episodes = 100
 
-losses = []
-rewards = []
 
-logging.info("Starting agent training")
-for i_episode in range(num_episodes):
-    episode_losses = []
-    episode_rewards = []
-    # Initialize the environment and get its state
-    state = chain.reset()
-    # state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    # for t in count():
-    for t in range(32):
-        action = select_action(chain, state)
-        # print(action)
-        next_state, reward, terminated, _ = chain.step(action.squeeze().cpu().numpy())
-        reward = torch.tensor([reward], device=device)
+n_runs = 10
 
-        if terminated:
-            next_state = None
-        # else:
-        #     next_state = torch.tensor(next_state, dtype=torch.float32, device=device).unsqueeze(0)
+runs_losses = []
+runs_rewards = []
+logging.debug("Starting agent training")
+for run in tqdm(range(n_runs)):
+    logging.debug(f"Starting run {run + 1}")
+    losses = []
+    rewards = []
+    for i_episode in tqdm(range(num_episodes)):
+        episode_losses = []
+        episode_rewards = []
+        # Initialize the environment and get its state
+        state = chain.reset()
+        # state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        # for t in count():
+        for t in tqdm(range(16)):
+            # print(f"State in loop {state}")
+            action = select_action(chain, state)
+            # print(action)
+            next_state, reward, terminated, _ = chain.step(action.squeeze().cpu().numpy())
+            reward = torch.tensor([reward], device=device)
 
-        # Store the transition in memory
-        # print(f'Pushing: state with shape: {state.shape} and next_state with shape {next_state.shape}')
-        memory.push(state, action, next_state, reward)
+            if terminated:
+                next_state = None
 
-        # Move to the next state
-        state = next_state
+            # Store the transition in memory
+            # print(f'Pushing: state with shape: {state.shape} and next_state with shape {next_state.shape}')
+            memory.push(state, action, next_state, reward)
 
-        # Perform one step of the optimization (on the policy network)
-        loss = optimize_model()
-        if loss:
-            episode_losses.append(loss)
-            episode_rewards.append(reward.to('cpu'))
+            if terminated:
+                # episode_durations.append(t + 1)
+                # plot_durations()
+                break
 
-        if terminated:
-            # episode_durations.append(t + 1)
-            # plot_durations()
-            break
+            state = next_state
 
-    # Soft update of the target network's weights
-    # theta' <- tau * theta + (1 − tau) * theta'
-    target_net_state_dict = target_net.state_dict()
-    policy_net_state_dict = policy_net.state_dict()
-    for key in policy_net_state_dict:
-        target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
-    target_net.load_state_dict(target_net_state_dict)
-    # print(episode_losses)
-    avg_loss = np.mean(episode_losses)
-    avg_reward = np.mean(episode_rewards)
-    logging.debug(f"Episode {i_episode}: Avg loss: {avg_loss}, Avg reward: {avg_reward}")
-    print(f"Episode {i_episode}: Avg loss: {avg_loss}, Avg reward: {avg_reward}")
-    losses.append(avg_loss)
-    rewards.append(avg_reward)
+            if len(memory) < BATCH_SIZE:
+                continue
+            # Move to the next state
 
-    if (i_episode + 1) % 10 == 0:
-        torch.save(policy_net.state_dict(), f"models/policy_net_{i_episode + 1}.pth")
-        torch.save(target_net.state_dict(), f"models/target_net_{i_episode + 1}.pth")
+            # Perform one step of the optimization (on the policy network)
+            loss = optimize_model()
+            if loss:
+                episode_losses.append(loss)
+                episode_rewards.append(reward.to('cpu'))
 
 
+        # Soft update of the target network's weights
+        # theta' <- tau * theta + (1 − tau) * theta'
+        target_net_state_dict = target_net.state_dict()
+        policy_net_state_dict = policy_net.state_dict()
+        for key in policy_net_state_dict:
+            target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+        target_net.load_state_dict(target_net_state_dict)
+        # print(episode_losses)
+        logging.debug(f"Avg episode loss: {np.mean(episode_losses)}, Avg episode reward: {np.mean(episode_rewards)}")
+        print(f"Avg episode loss: {np.mean(episode_losses)}, Avg episode reward: {np.mean(episode_rewards)}")
+        losses.append(np.mean(episode_losses))
+        rewards.append(np.mean(episode_rewards))
+
+        if (i_episode + 1) % 10 == 0:
+            torch.save(policy_net.state_dict(), f"models/run_{run+1}_policy_net_{i_episode + 1}.pth")
+            torch.save(target_net.state_dict(), f"models/run_{run+1}_target_net_{i_episode + 1}.pth")
 
 
+torch.save(policy_net.state_dict(), f"models/policy_net_full.pth")
+torch.save(target_net.state_dict(), f"models/target_net_full.pth")
+
+logging.debug(f"Agent has completed")
 print('Agent has completed')

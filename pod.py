@@ -32,7 +32,6 @@ class Pod:
         if create:
             self.create()
 
-
     @contextmanager
     def scheduler_context(self):
         # Schedul the new job
@@ -52,18 +51,19 @@ class Pod:
 
     def receive_request(self, request: ChainableRequest, wait: bool = False):
         with self.scheduler_context():
+            # print(f"Received a request")
             if self.phase == PodPhase.RUNNING:
               # if self.request_queue.empty()
               request.status = RequestStatus.QUEUED
               self.request_queue.put(request)
-              if wait:
-                  while request.status != RequestStatus.RESOLVED and request.status != RequestStatus.ABORTED:
-                    #   print(f"Waiting for request {request.request_id} to be completed")
-                      time.sleep(0.001)
-                      # continue
-                  if request.status == RequestStatus.RESOLVED:
-                      return True
-                  return False
+              # if wait:
+              #     while request.status != RequestStatus.RESOLVED and request.status != RequestStatus.ABORTED:
+              #         print(f"Waiting for request {request.request_id} to be completed")
+              #         time.sleep(0.1)
+              #         # continue
+              #     if request.status == RequestStatus.RESOLVED:
+              #         return True
+              #     return False
               return True
             return False
 
@@ -71,10 +71,13 @@ class Pod:
         if not self.request_queue.empty():
             request = self.request_queue.get_nowait()
             try:
+                request.status = RequestStatus.PROCESSING
+                # print(f'Processing request {request.request_id}')
                 self.execute(request)
             except PodOverloadedException as e:
                 request.retries += 1
                 if request.retries > request.max_retries:
+                    # print(f'request {request.request_id} aborted')
                     request.status = RequestStatus.ABORTED
                 else:
                     request.status = RequestStatus.QUEUED
@@ -118,8 +121,8 @@ class Pod:
         # Unbox request and call next requests
         if request.next_request:
             # Next request processing times affect this pod
-            request.next_request.to(request.next_request.request, wait = True) # Don't we need to wait ?
-            processing_latency += request.next_request.request.processing_latency
+            request.next_request.to(request.next_request.request, wait = True)
+            processing_latency += request.next_request.request.processing_latency + request.next_request.request.queuing_latency
             # queuing_latency += request.next_request.request.queuing_latency
 
         # Append subsequent latencies to the last latencies buffer
