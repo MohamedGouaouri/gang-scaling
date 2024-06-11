@@ -28,6 +28,8 @@ class Pod:
         self.scheduler = scheduler
         self.job = None
 
+        self.lock = Lock()
+
 
         if create:
             self.create()
@@ -50,20 +52,21 @@ class Pod:
             self.process_requests()
 
     def receive_request(self, request: ChainableRequest, wait: bool = False):
-        with self.scheduler_context():
             # print(f"Received a request")
             if self.phase == PodPhase.RUNNING:
               # if self.request_queue.empty()
               request.status = RequestStatus.QUEUED
               self.request_queue.put(request)
-              # if wait:
-              #     while request.status != RequestStatus.RESOLVED and request.status != RequestStatus.ABORTED:
-              #         print(f"Waiting for request {request.request_id} to be completed")
-              #         time.sleep(0.1)
-              #         # continue
-              #     if request.status == RequestStatus.RESOLVED:
-              #         return True
-              #     return False
+              # handle the request
+              self.scheduler.add_job(self.run)
+              if wait:
+                  while request.status != RequestStatus.RESOLVED and request.status != RequestStatus.ABORTED:
+                      # print(f"Waiting for request {request.request_id} {request.status} to be completed")
+                      time.sleep(0.1)
+                      # continue
+                  if request.status == RequestStatus.RESOLVED:
+                      return True
+                  return False
               return True
             return False
 
@@ -74,22 +77,26 @@ class Pod:
                 request.status = RequestStatus.PROCESSING
                 # print(f'Processing request {request.request_id}')
                 self.execute(request)
-            except PodOverloadedException as e:
-                request.retries += 1
-                if request.retries > request.max_retries:
-                    # print(f'request {request.request_id} aborted')
-                    request.status = RequestStatus.ABORTED
-                else:
-                    request.status = RequestStatus.QUEUED
-                    self.request_queue.put(request)
-            finally:
                 request.status = RequestStatus.RESOLVED
+                # print(f'Request {request.request_id} is resolved')
                 self.request_queue.task_done()
-                # print(f"Request {request.request_id} done")
+            except PodOverloadedException as e:
+                request.status = RequestStatus.ABORTED
+                # print(f'Request {request.request_id} is aborted')
+                self.request_queue.task_done()
+                # request.retries += 1
+                # if request.retries > request.max_retries:
+                #     print(f'request {request.request_id} aborted')
+                #     request.status = RequestStatus.ABORTED
+                #     self.request_queue.task_done()
+                #     return
+                # else:
+                #     request.status = RequestStatus.QUEUED
+                #     self.request_queue.put(request)
+                #     return
 
 
     def execute(self, request: ChainableRequest):
-
         # Calculate cpu and memory consumption
         ## cpu unit is millicpu used by k8s
         ## memory unit is megabytes used by k8s
@@ -115,23 +122,25 @@ class Pod:
 
 
         # Update request's local latencies
-        request.processing_latency = processing_latency
-        request.queuing_latency = queuing_latency
+        request.processing_latency += processing_latency
+        request.queuing_latency += queuing_latency
 
         # Unbox request and call next requests
         if request.next_request:
             # Next request processing times affect this pod
+            # print('Unboxing request and sending to the next deployment pod')
             request.next_request.to(request.next_request.request, wait = True)
             processing_latency += request.next_request.request.processing_latency + request.next_request.request.queuing_latency
             # queuing_latency += request.next_request.request.queuing_latency
 
         # Append subsequent latencies to the last latencies buffer
-        self.last_latencies.append(queuing_latency + processing_latency)
+        with self.lock:
+          self.last_latencies.append(queuing_latency + processing_latency)
 
         ## Reset cpu and mem usage after processing
         self.cpu_usage = prev_cpu_usage
         self.memory_usage = prev_memory_usage
-        # print(f"Pod: {self.name} {queuing_latency + processing_latency}")
+        # print(f"Pod request latency: {self.name} {queuing_latency + processing_latency}")
 
 
     def get_processing_latency(self):
@@ -166,7 +175,8 @@ class Pod:
                 pass
 
     def get_pod_latency(self):
-        l = list(self.last_latencies)
+        with self.lock:
+            l = list(self.last_latencies)
         return 0 if len(l) == 0 else np.mean(l)
 
     def update_configs(self):

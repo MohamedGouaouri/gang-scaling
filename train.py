@@ -16,6 +16,7 @@ import logging
 import os
 import warnings
 from tqdm import tqdm
+from .types_ import DeploymentLoadBalancingStrategy
 
 
 
@@ -39,17 +40,17 @@ deps = [
         pod_arrival_rate=10,
         pod_service_rate=20,
         create=True,
-        # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
+        lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
         name="backend",
         replicas=2,
         pod_cpu_limit=4000, # 4 cpus
-        pod_memory_limit=2 * 2**30, # 1 gb
+        pod_memory_limit=2**30, # 1 gb
         pod_arrival_rate=5,
         pod_service_rate=4,
         create=True,
-        # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
+        lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
         name="database",
@@ -59,7 +60,7 @@ deps = [
         pod_arrival_rate=10,
         pod_service_rate=12,
         create=True,
-        # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
+        lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
     ),
     Deployment(
         name="redis",
@@ -69,10 +70,12 @@ deps = [
         pod_arrival_rate=5,
         pod_service_rate=10,
         create=True,
-        # lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
+        lb_strategy=DeploymentLoadBalancingStrategy.RANDOM
 
     )
 ]
+
+
 
 
 chain = MicroServiceChain(
@@ -88,12 +91,20 @@ chain\
     .add_chain('redis', 'database')\
     .build()
 # requests_paths = [RequestPath(deps[0], deps[1], deps[3], 5), RequestPath(deps[0], deps[1], deps[3], deps[2], 5)]
+# requests_paths = [RequestPath(deps[0], deps[1], deps[3], 5), RequestPath(deps[0], deps[1], deps[3], deps[2], 5)]
 chain.add_request_path(
     RequestPath(
         microservices=[deps[0], deps[1], deps[2]],
         num_requests=5,
         load_types = [RequestLoadType.LOW_CPU_LOW_MEM, RequestLoadType.LOW_CPU_HIGH_MEM, RequestLoadType.HIGH_CPU_HIGH_MEM],
-    ))
+  )
+).add_request_path(
+    RequestPath(
+        microservices=[deps[0], deps[1], deps[3], deps[2]],
+        num_requests=5,
+        load_types = [RequestLoadType.LOW_CPU_LOW_MEM, RequestLoadType.HIGH_CPU_LOW_MEM, RequestLoadType.HIGH_CPU_HIGH_MEM, RequestLoadType.HIGH_CPU_HIGH_MEM],
+    )
+)
 # ).add_request_path(
 #     RequestPath(
 #         microservices=[deps[0], deps[1], deps[3], deps[2]],
@@ -305,18 +316,18 @@ n_runs = 10
 runs_losses = []
 runs_rewards = []
 logging.debug("Starting agent training")
-for run in tqdm(range(n_runs)):
+for run in range(n_runs):
     logging.debug(f"Starting run {run + 1}")
     losses = []
     rewards = []
-    for i_episode in tqdm(range(num_episodes)):
+    for i_episode in range(num_episodes):
         episode_losses = []
         episode_rewards = []
         # Initialize the environment and get its state
         state = chain.reset()
         # state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         # for t in count():
-        for t in tqdm(range(16)):
+        for t in range(16):
             # print(f"State in loop {state}")
             action = select_action(chain, state)
             # print(action)

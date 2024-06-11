@@ -18,7 +18,7 @@ class MicroServiceChain(gym.Env):
             microservices: List[Deployment],
             entry_point: Deployment,
             max_replicas: int = 20,
-            slo_reward_factor = 0.7,
+            slo_reward_factor = 0.8,
         ):
         self.microservices = microservices
         self.entry_point = entry_point
@@ -52,10 +52,12 @@ class MicroServiceChain(gym.Env):
         self.batch = None
 
         self.n_aborted_requests  = 0
-        self.cool_down_period = 5
+        self.cool_down_period = 2
 
         # self.scheduler = threading.Thread(target=self.generate_load_continuously)
         self.scheduler = BackgroundScheduler()
+        self.scheduler.add_job(self.generate_load_continuously)
+
 
     def add_chain(self, source: str, target: str):
         # First, we need to make sure that source and target are part of the graph
@@ -130,7 +132,6 @@ class MicroServiceChain(gym.Env):
         self.edge_index = data.edge_index
         self.batch = data.batch
 
-
         return data.x
 
     def _update_graph_attr(self):
@@ -162,29 +163,28 @@ class MicroServiceChain(gym.Env):
         reward -= self.resource_reward_factor * torch.mean(cpu_usages)  # Penalize high CPU usage
         reward -= self.resource_reward_factor * torch.mean(memory_usages)  # Penalize high memory usage
         # reward -= np.mean(replicas)  # Penalize using more replicas
+        # print(f"number of abortions is: {self.n_aborted_requests}")
+
         reward -= self.n_aborted_requests * 10
 
         return reward
 
     def reset(self):
 
+        self.start()
         self._update_graph_attr()
         self.n_aborted_requests = 0
-
-        if not self.scheduler.running:
-            self.start()
-
         return self._get_graph_state()
 
     def _check_done(self, state):
         # Check if the episode is done
         # Example: stop if latency exceeds a threshold
-        latencies = state[:, 0]
-        cpu_usages = state[:, 1]
-        memory_usages = state[:, 2]
+        # latencies = state[:, 0]
+        # cpu_usages = state[:, 1]
+        # memory_usages = state[:, 2]
         # Arbitrary threshold
-        if torch.any(latencies > 10) or torch.any(cpu_usages > 1.0) or torch.any(memory_usages > 1.0):
-            return True
+        # if torch.any(latencies > 10) or torch.any(cpu_usages > 1.0) or torch.any(memory_usages > 1.0):
+        #     return True
         return False
 
 
@@ -202,14 +202,12 @@ class MicroServiceChain(gym.Env):
                 self.__call__(req)
                 if req.status == RequestStatus.ABORTED:
                     self.n_aborted_requests += 1
-        # print(f"number of abortions is: {self.n_aborted_requests}")
 
     def start(self):
-        self.scheduler.add_job(self.generate_load_continuously)
-        if self.scheduler.running:
-          self.scheduler.resume()
+        if not self.scheduler.running:
+          self.scheduler.start()
           return
-        self.scheduler.start()
+        self.scheduler.resume()
 
 
 
