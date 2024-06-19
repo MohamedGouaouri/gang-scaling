@@ -55,7 +55,8 @@ class Deployment:
             if self.lb_strategy == DeploymentLoadBalancingStrategy.RANDOM:
                 selected_pod = random.choice(self.pods)
             elif self.lb_strategy == DeploymentLoadBalancingStrategy.LEAST_USED:
-                selected_pod = min(self.pods, key=lambda pod: pod.cpu_usage + pod.memory_usage)
+                running = list(filter(lambda pod: pod.phase == PodPhase.RUNNING, self.pods))
+                selected_pod = min(running, key=lambda pod: pod.cpu_usage + pod.memory_usage)
             if not selected_pod:
                 print("No pod selected")
                 return False
@@ -74,6 +75,8 @@ class Deployment:
             pods_to_terminate = random.choices(self.pods, k = self.replicas - new_replicas)
             for pod in pods_to_terminate:
                 pod.stop()
+                # Delete pod from array
+                self.pods = list(filter(lambda p: p.pod_id != pod.pod_id, self.pods))
             self.replicas = new_replicas
             return
         elif self.replicas < new_replicas:

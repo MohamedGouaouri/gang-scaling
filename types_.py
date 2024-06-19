@@ -5,7 +5,7 @@ import random
 class PodPhase(Enum):
     PENDING = "Pending"
     RUNNING = "Running"
-    SUCCEEDED = "Succeeded"
+    TERMINATED = "Teriminated"
     FAILED = "Failed"
 
     def __repr__(self):
@@ -23,14 +23,14 @@ class RequestLoadType(Enum):
     HIGH_CPU_HIGH_MEM = "HighCpu_HighMem"
     HIGH_CPU_LOW_MEM = "HighCpu_LowMem"
     LOW_CPU_HIGH_MEM = "LowCpu_HighMem"
-    LOW_CPU_LOW_MEM = "LowCpu_LowhMem"
+    LOW_CPU_LOW_MEM = "LowCpu_LowMem"
 
     def get_metrics(self):
         mapping = {
             RequestLoadType.HIGH_CPU_HIGH_MEM: (1000, 100 * 2 ** 20),   # 1 CPU core and 100 MB
-            RequestLoadType.HIGH_CPU_LOW_MEM: (100, 1 * 2 ** 20),       # 1 CPU core and 1 MB
-            RequestLoadType.LOW_CPU_HIGH_MEM: (1, 100 * 2 ** 20),       # 10% CPU core and 100 MB
-            RequestLoadType.LOW_CPU_LOW_MEM: (1, 1 * 2 ** 20),          # 10% CPU core and 1 MB
+            RequestLoadType.HIGH_CPU_LOW_MEM: (1000, 10 * 2 ** 20),       # 1 CPU core and 10 MB
+            RequestLoadType.LOW_CPU_HIGH_MEM: (100, 100 * 2 ** 20),       # 10% CPU core and 100 MB
+            RequestLoadType.LOW_CPU_LOW_MEM: (100, 10 * 2 ** 20),          # 10% CPU core and 10 MB
         }
         base = mapping[self]
 
@@ -88,7 +88,7 @@ class ChainableRequest(PodRequest):
         super().__init__(request_id, cpu_consumption, memory_consumption, queuing_latency, processing_latency,status, load_type)
         self.next_request = next_request
         self.retries = 0
-        self.max_retries = 3
+        self.max_retries = 2
 
 
     def total_processing_latency(self):
@@ -131,11 +131,12 @@ class NextRequest:
         return f"<NextRequest(to={self.to}, request={repr(self.request)})>"
 
 
-
 class PodOverloadedException(Exception):
     def __init__(self, message: str = 'Pod is overloaded'):
         super().__init__(message)
 
 class RequestMaxRetriesReached(Exception):
+    def __init__(self, message: str = 'RequestMaxRetriesReached'):
+        super().__init__(message)
     def __init__(self, message: str = 'RequestMaxRetriesReached'):
         super().__init__(message)
